@@ -513,7 +513,7 @@ def evaluate(config_path,
     mem = mem_params + mem_bufs
     print('Memory requirement is: ', mem//1024, ' kbytes')
     net.eval()
-    net.set_rpn_stages_to_execute(3)
+    net.set_rpn_stages_to_execute(1)
     result_path_step = result_path / f"step_{net.get_global_step()}"
     result_path_step.mkdir(parents=True, exist_ok=True)
     t = time.time()
@@ -525,34 +525,31 @@ def evaluate(config_path,
     prep_times = []
     t2 = time.time()
 
-    mem_allocs = []
-    print('Starting forward, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
+    # mem_allocs = []
+    # print('Starting forward, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
     for example in iter(eval_dataloader):
         if measure_time:
             prep_times.append(time.time() - t2)
             torch.cuda.synchronize()
             t1 = time.time()
         example = example_convert_to_torch(example, float_dtype)
-        mem_allocs.append(torch.cuda.memory_allocated()//1024)
+        # mem_allocs.append(torch.cuda.memory_allocated()//1024)
         if measure_time:
             torch.cuda.synchronize()
             prep_example_times.append(time.time() - t1)
         with torch.no_grad():
             detections += net(example)
-            # KU-CSL
-            #print('box3d_lidar', " Size: ", detections[-1]['box3d_lidar'].size())
-            #print('scores', " Size: ", detections[-1]['scores'].size())
-            #print('label_preds', " Size: ", detections[-1]['label_preds'].size())
 
-        mem_allocs.append(torch.cuda.memory_allocated()//1024)
+        # mem_allocs.append(torch.cuda.memory_allocated()//1024)
         bar.print_bar()
         if measure_time:
             t2 = time.time()
 
+
     # KU-CSL
     print('all detections length:', len(detections))
 
-    print('After forward, max of all memory_allocated is: ', max(mem_allocs), ' kbytes')
+    # print('After forward, max of all memory_allocated is: ', max(mem_allocs), ' kbytes')
     print('After forward, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
     print('After forward, max_memory_allocated is: ', torch.cuda.max_memory_allocated()//1024, ' kbytes')
 
