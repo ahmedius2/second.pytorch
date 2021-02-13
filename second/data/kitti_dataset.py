@@ -11,6 +11,7 @@ from second.data import kitti_common as kitti
 from second.utils.eval import get_coco_eval_result, get_official_eval_result
 from second.data.dataset import Dataset, register_dataset
 from second.utils.progress_bar import progress_bar_iter as prog_bar
+from os import getenv
 
 @register_dataset
 class KittiDataset(Dataset):
@@ -106,7 +107,7 @@ class KittiDataset(Dataset):
             annos[-1]["metadata"] = det["metadata"]
         return annos
 
-    def evaluation(self, detections, output_dir):
+    def evaluation(self, detections, output_dir, dump_gt_dt_annos=False):
         """
         detection
         When you want to eval your own dataset, you MUST set correct
@@ -132,6 +133,12 @@ class KittiDataset(Dataset):
         gt_annos = [info["annos"] for info in self._kitti_infos]
         dt_annos = self.convert_detection_to_kitti_annos(detections)
         # firstly convert standard detection to kitti-format dt annos
+
+        if dump_gt_dt_annos:
+            gt_and_dt_annos = [gt_annos, dt_annos]
+            pickle.dump(gt_and_dt_annos, open(getenv('HOME')+"/gt_and_dt_annos.pickle", "wb"),
+                protocol=0)
+
         z_axis = 1  # KITTI camera format use y as regular "z" axis.
         z_center = 1.0  # KITTI camera box's center is [0.5, 1, 0.5]
         # for regular raw lidar data, z_axis = 2, z_center = 0.5.

@@ -169,7 +169,7 @@ def build_network_():
         proto_str = f.read()
         text_format.Merge(proto_str, config)
     device = device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    net = build_network(config.model.second).to(device).float().eval()
+    net = build_network(config.model.second, measure_time=False, imprecise_computation=True).to(device).float().eval()
     net.load_state_dict(torch.load(ckpt_path))
     eval_input_cfg = config.eval_input_reader
     BACKEND.dataset = input_reader_builder.build(
@@ -178,6 +178,7 @@ def build_network_():
         training=False,
         voxel_generator=net.voxel_generator,
         target_assigner=net.target_assigner).dataset
+    net.set_rpn_stages_to_execute(1)
     BACKEND.net = net
     BACKEND.config = config
     BACKEND.device = device

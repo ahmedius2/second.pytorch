@@ -55,7 +55,7 @@ def example_convert_to_torch(example, dtype=torch.float32,
     return example_torch
 
 
-def build_network(model_cfg, measure_time=False):
+def build_network(model_cfg, measure_time=False, imprecise_computation=False):
     voxel_generator = voxel_builder.build(model_cfg.voxel_generator)
     bv_range = voxel_generator.point_cloud_range[[0, 1, 3, 4]]
     box_coder = box_coder_builder.build(model_cfg.box_coder)
@@ -64,7 +64,8 @@ def build_network(model_cfg, measure_time=False):
                                                     bv_range, box_coder)
     box_coder.custom_ndim = target_assigner._anchor_generators[0].custom_ndim
     net = second_builder.build(
-        model_cfg, voxel_generator, target_assigner, measure_time=measure_time)
+        model_cfg, voxel_generator, target_assigner, measure_time=measure_time,
+        imprecise_computation=imprecise_computation)
     return net
 
 def _worker_init_fn(worker_id):
@@ -140,7 +141,8 @@ def train(config_path,
           freeze_exclude=None,
           multi_gpu=False,
           measure_time=False,
-          resume=False):
+          resume=False,
+          imprecise_computation=False):
     """train a VoxelNet model specified by a config file.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -175,7 +177,7 @@ def train(config_path,
     model_cfg = config.model.second
     train_cfg = config.train_config
 
-    net = build_network(model_cfg, measure_time).to(device)
+    net = build_network(model_cfg, measure_time, imprecise_computation=imprecise_computation).to(device)
     # if train_cfg.enable_mixed_precision:
     #     net.half()
     #     net.metrics_to_float()
@@ -186,20 +188,26 @@ def train(config_path,
     torchplus.train.try_restore_latest_checkpoints(model_dir, [net])
     if pretrained_path is not None:
         model_dict = net.state_dict()
+        print('Initial state of the network:')
+        for k, v in model_dict.items():
+            print(k, v.shape, 'requires_grad:', v.requires_grad)
         pretrained_dict = torch.load(pretrained_path)
         pretrained_dict = filter_param_dict(pretrained_dict, pretrained_include, pretrained_exclude)
         new_pretrained_dict = {}
+        print('Loading pretrained weights to:')
         for k, v in pretrained_dict.items():
             if k in model_dict and v.shape == model_dict[k].shape:
-                new_pretrained_dict[k] = v        
-        print("Load pretrained parameters:")
-        for k, v in new_pretrained_dict.items():
-            print(k, v.shape)
-        model_dict.update(new_pretrained_dict) 
+                new_pretrained_dict[k] = v
+
+        model_dict.update(new_pretrained_dict)
         net.load_state_dict(model_dict)
         freeze_params_v2(dict(net.named_parameters()), freeze_include, freeze_exclude)
         net.clear_global_step()
         net.clear_metrics()
+
+        print('Last state of the network parameters:')
+        for k, v in dict(net.named_parameters()).items():
+            print(k, v.shape, 'requires_grad:', v.requires_grad)
     if multi_gpu:
         net_parallel = torch.nn.DataParallel(net)
     else:
@@ -436,12 +444,13 @@ def evaluate(config_path,
              ckpt_path=None,
              measure_time=False,
              batch_size=None,
+             imprecise_computation=False,
              **kwargs):
     """Don't support pickle_result anymore. if you want to generate kitti label file,
     please use kitti_anno_to_label_file and convert_detection_to_kitti_annos
     in second.data.kitti_dataset.
     """
-    assert len(kwargs) == 0
+    #assert len(kwargs) == 0
     model_dir = str(Path(model_dir).resolve())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     result_name = 'eval_results'
@@ -465,7 +474,7 @@ def evaluate(config_path,
     model_cfg = config.model.second
     train_cfg = config.train_config
 
-    net = build_network(model_cfg, measure_time=measure_time).to(device)
+    net = build_network(model_cfg, measure_time=measure_time, imprecise_computation=imprecise_computation).to(device)
     if train_cfg.enable_mixed_precision:
         net.half()
         print("half inference!")
@@ -499,7 +508,12 @@ def evaluate(config_path,
     else:
         float_dtype = torch.float32
 
+    mem_params = sum([param.nelement() * param.element_size() for param in net.parameters()])
+    mem_bufs = sum([buf.nelement() * buf.element_size() for buf in net.buffers()])
+    mem = mem_params + mem_bufs
+    print('Memory requirement is: ', mem//1024, ' kbytes')
     net.eval()
+    net.set_rpn_stages_to_execute(3)
     result_path_step = result_path / f"step_{net.get_global_step()}"
     result_path_step.mkdir(parents=True, exist_ok=True)
     t = time.time()
@@ -511,20 +525,36 @@ def evaluate(config_path,
     prep_times = []
     t2 = time.time()
 
+    mem_allocs = []
+    print('Starting forward, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
     for example in iter(eval_dataloader):
         if measure_time:
             prep_times.append(time.time() - t2)
             torch.cuda.synchronize()
             t1 = time.time()
         example = example_convert_to_torch(example, float_dtype)
+        mem_allocs.append(torch.cuda.memory_allocated()//1024)
         if measure_time:
             torch.cuda.synchronize()
             prep_example_times.append(time.time() - t1)
         with torch.no_grad():
             detections += net(example)
+            # KU-CSL
+            #print('box3d_lidar', " Size: ", detections[-1]['box3d_lidar'].size())
+            #print('scores', " Size: ", detections[-1]['scores'].size())
+            #print('label_preds', " Size: ", detections[-1]['label_preds'].size())
+
+        mem_allocs.append(torch.cuda.memory_allocated()//1024)
         bar.print_bar()
         if measure_time:
             t2 = time.time()
+
+    # KU-CSL
+    print('all detections length:', len(detections))
+
+    print('After forward, max of all memory_allocated is: ', max(mem_allocs), ' kbytes')
+    print('After forward, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
+    print('After forward, max_memory_allocated is: ', torch.cuda.max_memory_allocated()//1024, ' kbytes')
 
     sec_per_example = len(eval_dataset) / (time.time() - t)
     print(f'generate label finished({sec_per_example:.2f}/s). start eval:')
@@ -535,10 +565,13 @@ def evaluate(config_path,
         print(f"avg prep time: {np.mean(prep_times) * 1000:.3f} ms")
     for name, val in net.get_avg_time_dict().items():
         print(f"avg {name} time = {val * 1000:.3f} ms")
-    with open(result_path_step / "result.pkl", 'wb') as f:
-        pickle.dump(detections, f)
+    #with open(result_path_step / "result.pkl", 'wb') as f:
+    #    pickle.dump(detections, f)
     result_dict = eval_dataset.dataset.evaluation(detections,
                                                   str(result_path_step))
+    print('After eval, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
+    print('After eval, max_memory_allocated is: ', torch.cuda.max_memory_allocated()//1024, ' kbytes')
+
     if result_dict is not None:
         for k, v in result_dict["results"].items():
             print("Evaluation {}".format(k))
