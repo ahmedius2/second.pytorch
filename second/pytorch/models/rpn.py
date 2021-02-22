@@ -11,6 +11,7 @@ from torchplus.tools import change_default_args
 
 REGISTERED_RPN_CLASSES = {}
 
+
 def register_rpn(cls, name=None):
     global REGISTERED_RPN_CLASSES
     if name is None:
@@ -19,10 +20,12 @@ def register_rpn(cls, name=None):
     REGISTERED_RPN_CLASSES[name] = cls
     return cls
 
+
 def get_rpn_class(name):
     global REGISTERED_RPN_CLASSES
     assert name in REGISTERED_RPN_CLASSES, f"available class: {REGISTERED_RPN_CLASSES}"
     return REGISTERED_RPN_CLASSES[name]
+
 
 @register_rpn
 class RPN(nn.Module):
@@ -199,6 +202,7 @@ class RPN(nn.Module):
 
         return ret_dict
 
+
 class RPNNoHeadBase(nn.Module):
     def __init__(self,
                  use_norm=True,
@@ -230,7 +234,7 @@ class RPNNoHeadBase(nn.Module):
         self._use_norm = use_norm
         self._use_groupnorm = use_groupnorm
         self._num_groups = num_groups
-        self._stages_to_execute = len(self._layer_nums)
+
         assert len(layer_strides) == len(layer_nums)
         assert len(num_filters) == len(layer_nums)
         assert len(num_upsample_filters) == len(upsample_strides)
@@ -309,13 +313,13 @@ class RPNNoHeadBase(nn.Module):
             factor /= self._upsample_strides[-1]
         return factor
 
-    def _make_layer(self, inplanes, planes, num_blocks, stride=1):
+    def _make_layer(self, inplanes, planes, num_layers, stride=1):
         raise NotImplementedError
 
     def forward(self, x):
         ups = []
         stage_outputs = []
-        for i in range(self._stages_to_execute):
+        for i in range(len(self.blocks)):
             x = self.blocks[i](x)
             stage_outputs.append(x)
             if i - self._upsample_start_idx >= 0:
@@ -323,10 +327,9 @@ class RPNNoHeadBase(nn.Module):
 
         res = {}
 
-        if not self._imprecise_computation:
-            if len(ups) > 0:
-                x = torch.cat(ups, dim=1)
-                res["out"] = x
+        if len(ups) > 0:
+            x = torch.cat(ups, dim=1)
+            res["out"] = x
 
         for i, up in enumerate(ups):
             res[f"up{i}"] = up
@@ -334,27 +337,16 @@ class RPNNoHeadBase(nn.Module):
             res[f"stage{i}"] = out
         return res
 
-    def set_stages_to_execute(self, num_stages : int):
-        """
-        Use this function to set how many stages you want to execute
-        Args:
-            num_stages:
+    def forward_stage_block(self, inp_outp_dict):
+        next_stg = inp_outp_dict["stages_executed"]+1
+        assert (next_stg <= len(self._layer_nums))
 
-        Returns:
+        inp_outp_dict[f"stage{next_stg}"] = self.blocks[next_stg-1](
+            inp_outp_dict[f"stage{next_stg-1}"])
+        inp_outp_dict[f"up{next_stg}"] = self.deblocks[next_stg-1](
+            inp_outp_dict[f"stage{next_stg}"])
 
-        """
-        if num_stages == 3 or num_stages == 2 or num_stages == 1:
-            self._stages_to_execute = num_stages
-        else:
-            raise ValueError
-
-    def get_stages_to_execute(self):
-        """
-
-        Returns: num_stages
-
-        """
-        return self._stages_to_execute
+        return inp_outp_dict
 
 class RPNBase(RPNNoHeadBase):
     def __init__(self,
@@ -395,6 +387,7 @@ class RPNBase(RPNNoHeadBase):
             box_code_size=box_code_size,
             num_direction_bins=num_direction_bins,
             name=name)
+        self._layer_nums=layer_nums
         self._num_anchor_per_loc = num_anchor_per_loc
         self._num_direction_bins = num_direction_bins
         self._num_class = num_class
@@ -416,22 +409,22 @@ class RPNBase(RPNNoHeadBase):
         print('self._imprecise_computation:', self._imprecise_computation)
         if self._imprecise_computation:
             print('Building RPN with ability to do imprecise computation')
-            #assert len(num_upsample_filters) == 3
+            # assert len(num_upsample_filters) == 3
             self.conv_cls1, self.conv_cls2, self.conv_cls3 = None, None, None
             self.conv_cls_alternatives = [self.conv_cls1, self.conv_cls2, self.conv_cls3]
             self.conv_box1, self.conv_box2, self.conv_box3 = None, None, None
             self.conv_box_alternatives = [self.conv_box1, self.conv_box2, self.conv_box3]
-            for i in range(1, len(num_upsample_filters)+1):
-                self.conv_cls_alternatives[i-1] = nn.Conv2d(sum(num_upsample_filters[:i]), num_cls, 1)
-                self.conv_box_alternatives[i-1] = nn.Conv2d(sum(num_upsample_filters[:i]),
-                                                            num_anchor_per_loc * box_code_size, 1)
+            for i in range(1, len(num_upsample_filters) + 1):
+                self.conv_cls_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]), num_cls, 1)
+                self.conv_box_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]),
+                                                              num_anchor_per_loc * box_code_size, 1)
             self.conv_cls1, self.conv_cls2, self.conv_cls3 = self.conv_cls_alternatives[:]
             self.conv_box1, self.conv_box2, self.conv_box3 = self.conv_box_alternatives[:]
 
         else:
             self.conv_cls = nn.Conv2d(final_num_filters, num_cls, 1)
             self.conv_box = nn.Conv2d(final_num_filters,
-                                       num_anchor_per_loc * box_code_size, 1)
+                                      num_anchor_per_loc * box_code_size, 1)
 
         if use_direction_classifier:
             if self._imprecise_computation:
@@ -439,24 +432,29 @@ class RPNBase(RPNNoHeadBase):
                 self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3 = None, None, None
                 self.conv_dir_cls_alternatives = [self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3]
                 for i in range(1, len(num_upsample_filters) + 1):
-                    self.conv_dir_cls_alternatives[i-1] = nn.Conv2d(sum(num_upsample_filters[:i]),
-                                                                    num_anchor_per_loc * num_direction_bins, 1)
+                    self.conv_dir_cls_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]),
+                                                                      num_anchor_per_loc * num_direction_bins, 1)
                 self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3 = self.conv_dir_cls_alternatives[:]
             else:
                 self.conv_dir_cls = nn.Conv2d(
-                final_num_filters, num_anchor_per_loc * num_direction_bins, 1)
+                    final_num_filters, num_anchor_per_loc * num_direction_bins, 1)
 
     def forward(self, x):
+        # RPN blocks are executed here
+        # Calling forward directly is actually not recommended
+        # but the original repo did that instead of using ()
+        # so I am going to do it as well ! :)
         res = super().forward(x)
         if self._imprecise_computation:
             all_cls_preds = []
             all_box_preds = []
             all_dir_cls_preds = []
-            for i in range(self._stages_to_execute):
-                if self._training or i + 1 == self._stages_to_execute:
+            # Now we execute RPN Head
+            for i in range(len(self._layer_nums)):
+                if self._training or i + 1 == len(self._layer_nums):
                     to_concat = []
-                    for j in range(i+1):
-                        to_concat.append(res["up"+str(j)])
+                    for j in range(i + 1):
+                        to_concat.append(res["up" + str(j)])
                     # last iter will save x, ignore previous ones
                     x = torch.cat(to_concat, dim=1)
                     x_cls = self.conv_cls_alternatives[i](x)
@@ -489,11 +487,11 @@ class RPNBase(RPNNoHeadBase):
             C, H, W = box_preds.shape[1:]
             box_preds = box_preds.view(-1, self._num_anchor_per_loc,
                                        self._box_code_size, H, W).permute(
-                                           0, 1, 3, 4, 2).contiguous()
+                0, 1, 3, 4, 2).contiguous()
 
             cls_preds = cls_preds.view(-1, self._num_anchor_per_loc,
                                        self._num_class, H, W).permute(
-                                           0, 1, 3, 4, 2).contiguous()
+                0, 1, 3, 4, 2).contiguous()
             # box_preds = box_preds.permute(0, 2, 3, 1).contiguous()
             # cls_preds = cls_preds.permute(0, 2, 3, 1).contiguous()
 
@@ -513,16 +511,49 @@ class RPNBase(RPNNoHeadBase):
 
         return ret_dict
 
+    def forward_stage(self, inp_outp_dict):
+        next_stg = inp_outp_dict["stages_executed"] + 1
+        res = self.forward_stage_block(inp_outp_dict)
+        if next_stg == 1:
+            # Input of backbone should be assigned before this call:
+            # inp_outp_dict["stage0"] = x
+            backbone_out = res["up1"]
+        else:
+            to_concat = [res["up" + str(j+1)] for j in range(next_stg)]
+            backbone_out = torch.cat(to_concat, dim=1)
+
+        # This is detection head
+        # overriding predictions with new ones is what is intended
+        x_cls = self.conv_cls_alternatives[next_stg-1](backbone_out)
+        C, H, W = x_cls.shape[1:]
+        inp_outp_dict["cls_preds"] = x_cls.view(-1, self._num_anchor_per_loc, self._num_class, H, W).permute(
+            0, 1, 3, 4, 2).contiguous()
+
+        x_box = self.conv_box_alternatives[next_stg-1](backbone_out)
+        inp_outp_dict["box_preds"] = x_box.view(-1, self._num_anchor_per_loc, self._box_code_size, H, W).permute(
+            0, 1, 3, 4, 2).contiguous()
+
+        if self._use_direction_classifier:
+            x_dir = self.conv_dir_cls_alternatives[next_stg-1](backbone_out)
+            inp_outp_dict["dir_cls_preds"] = x_dir.view(-1, self._num_anchor_per_loc, self._num_direction_bins, H, W).permute(
+                0, 1, 3, 4, 2).contiguous()
+
+        inp_outp_dict["stages_executed"] += 1
+
+        return inp_outp_dict
+
     def set_mode_training(self):
         self._training = True
 
     def set_mode_evaluation(self):
         self._training = False
 
+
 def conv1x1(in_planes, out_planes, stride=1):
     """1x1 convolution"""
     return nn.Conv2d(
         in_planes, out_planes, kernel_size=1, stride=stride, bias=False)
+
 
 @register_rpn
 class ResNetRPN(RPNBase):
@@ -544,7 +575,7 @@ class ResNetRPN(RPNBase):
             elif isinstance(m, resnet.BasicBlock):
                 nn.init.constant_(m.bn2.weight, 0)
 
-    def _make_layer(self, inplanes, planes, num_blocks, stride=1):
+    def _make_layer(self, inplanes, planes, num_layers, stride=1):
         if self.inplanes == -1:
             self.inplanes = self._num_input_features
         block = resnet.BasicBlock
@@ -558,20 +589,21 @@ class ResNetRPN(RPNBase):
         layers = []
         layers.append(block(self.inplanes, planes, stride, downsample))
         self.inplanes = planes * block.expansion
-        for _ in range(1, num_blocks):
+        for _ in range(1, num_layers):
             layers.append(block(self.inplanes, planes))
 
         return nn.Sequential(*layers), self.inplanes
 
+
 @register_rpn
 class RPNV2(RPNBase):
-    def _make_layer(self, inplanes, planes, num_blocks, stride=1):
+    def _make_layer(self, inplanes, planes, num_layers, stride=1):
         """
         Constructs a single RPN branch
         Args:
             inplanes:
             planes:
-            num_blocks:
+            num_layers:
             stride:
 
         Returns:
@@ -599,12 +631,13 @@ class RPNV2(RPNBase):
             BatchNorm2d(planes),
             nn.ReLU(),
         )
-        for j in range(num_blocks):
+        for j in range(num_layers):
             block.add(Conv2d(planes, planes, 3, padding=1))
             block.add(BatchNorm2d(planes))
             block.add(nn.ReLU())
 
         return block, planes
+
 
 @register_rpn
 class RPNNoHead(RPNNoHeadBase):

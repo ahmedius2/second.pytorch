@@ -5,7 +5,7 @@ from pathlib import Path
 import pickle
 import shutil
 import time
-import re 
+import re
 import fire
 import numpy as np
 import torch
@@ -23,6 +23,7 @@ from second.pytorch.builder import (box_coder_builder, input_reader_builder,
 from second.utils.log_tool import SimpleModelLog
 from second.utils.progress_bar import ProgressBar
 import psutil
+
 
 def example_convert_to_torch(example, dtype=torch.float32,
                              device=None) -> dict:
@@ -68,12 +69,14 @@ def build_network(model_cfg, measure_time=False, imprecise_computation=False):
         imprecise_computation=imprecise_computation)
     return net
 
+
 def _worker_init_fn(worker_id):
     time_seed = np.array(time.time(), dtype=np.int32)
     np.random.seed(time_seed + worker_id)
     print(f"WORKER {worker_id} seed:", np.random.get_state()[1][0])
 
-def freeze_params(params: dict, include: str=None, exclude: str=None):
+
+def freeze_params(params: dict, include: str = None, exclude: str = None):
     assert isinstance(params, dict)
     include_re = None
     if include is not None:
@@ -85,14 +88,15 @@ def freeze_params(params: dict, include: str=None, exclude: str=None):
     for k, p in params.items():
         if include_re is not None:
             if include_re.match(k) is not None:
-                continue 
+                continue
         if exclude_re is not None:
             if exclude_re.match(k) is None:
-                continue 
+                continue
         remain_params.append(p)
     return remain_params
 
-def freeze_params_v2(params: dict, include: str=None, exclude: str=None):
+
+def freeze_params_v2(params: dict, include: str = None, exclude: str = None):
     assert isinstance(params, dict)
     include_re = None
     if include is not None:
@@ -108,7 +112,8 @@ def freeze_params_v2(params: dict, include: str=None, exclude: str=None):
             if exclude_re.match(k) is None:
                 p.requires_grad = False
 
-def filter_param_dict(state_dict: dict, include: str=None, exclude: str=None):
+
+def filter_param_dict(state_dict: dict, include: str = None, exclude: str = None):
     assert isinstance(state_dict, dict)
     include_re = None
     if include is not None:
@@ -123,7 +128,7 @@ def filter_param_dict(state_dict: dict, include: str=None, exclude: str=None):
                 continue
         if exclude_re is not None:
             if exclude_re.match(k) is not None:
-                continue 
+                continue
         res_dict[k] = p
     return res_dict
 
@@ -146,7 +151,7 @@ def train(config_path,
     """train a VoxelNet model specified by a config file.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
+
     model_dir = str(Path(model_dir).resolve())
     if create_folder:
         if Path(model_dir).exists():
@@ -226,10 +231,10 @@ def train(config_path,
         assert max_num_voxels < 65535, "spconv fp16 training only support this"
         from apex import amp
         net, amp_optimizer = amp.initialize(net, fastai_optimizer,
-                                        opt_level="O2",
-                                        keep_batchnorm_fp32=True,
-                                        loss_scale=loss_scale
-                                        )
+                                            opt_level="O2",
+                                            keep_batchnorm_fp32=True,
+                                            loss_scale=loss_scale
+                                            )
         net.metrics_to_float()
     else:
         amp_optimizer = fastai_optimizer
@@ -278,7 +283,7 @@ def train(config_path,
         drop_last=not multi_gpu)
     eval_dataloader = torch.utils.data.DataLoader(
         eval_dataset,
-        batch_size=eval_input_cfg.batch_size, # only support multi-gpu train
+        batch_size=eval_input_cfg.batch_size,  # only support multi-gpu train
         shuffle=False,
         num_workers=eval_input_cfg.preprocess.num_workers,
         pin_memory=False,
@@ -320,7 +325,7 @@ def train(config_path,
                 cls_neg_loss = ret_dict["cls_neg_loss"].mean()
                 loc_loss = ret_dict["loc_loss"]
                 cls_loss = ret_dict["cls_loss"]
-                
+
                 cared = ret_dict["cared"]
                 labels = example_torch["labels"]
                 if train_cfg.enable_mixed_precision:
@@ -391,17 +396,17 @@ def train(config_path,
                     result_path_step = result_path / f"step_{net.get_global_step()}"
                     result_path_step.mkdir(parents=True, exist_ok=True)
                     model_logging.log_text("#################################",
-                                        global_step)
+                                           global_step)
                     model_logging.log_text("# EVAL", global_step)
                     model_logging.log_text("#################################",
-                                        global_step)
+                                           global_step)
                     model_logging.log_text("Generate output labels...", global_step)
                     t = time.time()
                     detections = []
                     prog_bar = ProgressBar()
                     net.clear_timer()
                     prog_bar.start((len(eval_dataset) + eval_input_cfg.batch_size - 1)
-                                // eval_input_cfg.batch_size)
+                                   // eval_input_cfg.batch_size)
                     for example in iter(eval_dataloader):
                         example = example_convert_to_torch(example, float_dtype)
                         detections += net(example)
@@ -450,7 +455,7 @@ def evaluate(config_path,
     please use kitti_anno_to_label_file and convert_detection_to_kitti_annos
     in second.data.kitti_dataset.
     """
-    #assert len(kwargs) == 0
+    # assert len(kwargs) == 0
     model_dir = str(Path(model_dir).resolve())
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     result_name = 'eval_results'
@@ -500,7 +505,7 @@ def evaluate(config_path,
         batch_size=batch_size,
         shuffle=False,
         num_workers=input_cfg.preprocess.num_workers,
-        pin_memory=False,
+        pin_memory=True,
         collate_fn=merge_second_batch)
 
     if train_cfg.enable_mixed_precision:
@@ -511,72 +516,186 @@ def evaluate(config_path,
     mem_params = sum([param.nelement() * param.element_size() for param in net.parameters()])
     mem_bufs = sum([buf.nelement() * buf.element_size() for buf in net.buffers()])
     mem = mem_params + mem_bufs
-    print('Memory requirement is: ', mem//1024, ' kbytes')
+    print('Memory requirement is: ', mem // 1024, ' kbytes')
     net.eval()
-    net.set_rpn_stages_to_execute(1)
+    # net.set_rpn_stages_to_execute(1)
     result_path_step = result_path / f"step_{net.get_global_step()}"
     result_path_step.mkdir(parents=True, exist_ok=True)
-    t = time.time()
-    detections = []
+
     print("Generate output labels...")
-    bar = ProgressBar()
-    bar.start((len(eval_dataset) + batch_size - 1) // batch_size)
-    prep_example_times = []
-    prep_times = []
-    t2 = time.time()
 
     # mem_allocs = []
     # print('Starting forward, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
-    for example in iter(eval_dataloader):
-        if measure_time:
-            prep_times.append(time.time() - t2)
-            torch.cuda.synchronize()
-            t1 = time.time()
-        example = example_convert_to_torch(example, float_dtype)
-        # mem_allocs.append(torch.cuda.memory_allocated()//1024)
-        if measure_time:
-            torch.cuda.synchronize()
-            prep_example_times.append(time.time() - t1)
-        with torch.no_grad():
-            detections += net(example)
+    # for example in iter(eval_dataloader):
 
-        # mem_allocs.append(torch.cuda.memory_allocated()//1024)
-        bar.print_bar()
-        if measure_time:
-            t2 = time.time()
+    # bar.start((len(eval_dataset) + batch_size - 1) // batch_size)
+    num_stages = 3
+    fetch_size = 4
+    bar = ProgressBar()
+    dataset_iter = iter(eval_dataloader)
 
+    def straight_eval():
+        dets = []
+        bar.start((len(eval_dataset)))
+        while True:
+            try:
+                net.start_timer("data preparation")
+                example = next(dataset_iter)
+                net.end_timer("data preparation")
+            except StopIteration:
+                return dets
+
+            net.start_timer("Whole pipeline")
+            net.start_timer("example to torch", use_cuda_events=True)
+            example = example_convert_to_torch(example, float_dtype)
+            net.end_timer("example to torch", use_cuda_events=True)
+            with torch.no_grad():
+                net.start_timer("Pillar feature net", use_cuda_events=True)
+                io_dict = net.forward_pfe(example)
+                net.end_timer("Pillar feature net", use_cuda_events=True)
+                for i in range(num_stages):
+                    net.start_timer(f"RPN stage {i} forward", use_cuda_events=True)
+                    io_dict = net.forward_rpn_stage(io_dict)
+                    net.end_timer(f"RPN stage {i} forward", use_cuda_events=True)
+                    if i < num_stages - 1:
+                        net.start_timer(f"Score mean calc {i}", use_cuda_events=True)
+                        batch_total_scores = net.calc_total_scores(
+                            example, io_dict)
+                        for ttl_scores in batch_total_scores:
+                            _ = net.calc_mean_of_scores(ttl_scores)  # for overhead
+                        net.end_timer(f"Score mean calc {i}", use_cuda_events=True)
+                        net.cuda_sync_and_calc_elapsed_times()
+                net.start_timer("Prediction", use_cuda_events=True)
+                net.outp_batch_sizes_check(example, io_dict["box_preds"])
+                dets += net.predict(example, io_dict)
+                net.end_timer("Prediction", use_cuda_events=True)
+                net.cuda_sync_and_calc_elapsed_times()
+                torch.cuda.synchronize()
+            net.end_timer("Whole pipeline")
+
+            bar.print_bar()
+
+    def multitask_simulation_eval():
+        dets = []
+        fs = fetch_size
+        bar.start((len(eval_dataset) + fs - 1) // fs)
+
+        while True:
+            bar.print_bar()
+
+            # All tasks execute first stage, rest is random and mingled
+            # This is a simulation to calculate overhead
+            remaining_stages = np.random.randint(1, num_stages + 1, size=fs)
+            net_selection = np.arange(fs)
+            stage_selection = []
+            for i, stg in enumerate(remaining_stages):
+                for j in range(stg - 1):
+                    stage_selection.append(i)
+            # print('stage_selection', stage_selection)
+            if len(stage_selection) != 0:
+                np.random.shuffle(stage_selection)  # commenting this made it work
+                net_selection = np.append(net_selection, stage_selection)
+            # print('net_selection', net_selection)
+
+            examples = []
+            try:
+                for i in range(fetch_size):
+                    net.start_timer("data preparation")
+                    examples.append(next(dataset_iter))
+                    net.end_timer("data preparation")
+            except StopIteration:
+                for example in examples:
+                    example = example_convert_to_torch(example, float_dtype)
+                    with torch.no_grad():
+                        io_dict = net.forward_pfe(example)
+                        for i in range(num_stages):
+                            io_dict = net.forward_rpn_stage(io_dict)
+                        net.outp_batch_sizes_check(example, io_dict["box_preds"])
+                        dets += net.predict(example, io_dict)
+                        torch.cuda.synchronize()
+
+                return dets
+
+            net.start_timer(f"{fs} whole pipeline {len(net_selection)} stages")
+            net.start_timer(f"{fs} example to torch", use_cuda_events=True)
+            torch_examples = [example_convert_to_torch(
+                example, float_dtype)
+                for example in examples]
+            net.end_timer(f"{fs} example to torch", use_cuda_events=True)
+
+            # mem_allocs.append(torch.cuda.memory_allocated()//1024)
+
+            with torch.no_grad():
+                net.start_timer(f"{fs} Pillar feature net", use_cuda_events=True)
+                io_dicts = [net.forward_pfe(example)
+                            for example in torch_examples]
+                net.end_timer(f"{fs} Pillar feature net", use_cuda_events=True)
+                print('net_selection', net_selection)
+                for selection in net_selection:
+                    stg = io_dicts[selection]['stages_executed'] + 1
+                    net.start_timer(f"RPN stage {stg} forward", use_cuda_events=True)
+                    io_dicts[selection] = net.forward_rpn_stage(io_dicts[selection])
+                    net.end_timer(f"RPN stage {stg} forward", use_cuda_events=True)
+                    if remaining_stages[selection] > 1:
+                        net.start_timer(f"Mean scores calc {stg}", use_cuda_events=True)
+                        batch_total_scores = net.calc_total_scores(
+                            torch_examples[selection], io_dicts[selection])
+                        for ttl_scores in batch_total_scores:
+                            _ = net.calc_mean_of_scores(ttl_scores)  # for overhead
+                        net.end_timer(f"Mean scores calc {stg}", use_cuda_events=True)
+                        net.cuda_sync_and_calc_elapsed_times()
+                    else:
+                        # print('predicting', selection)
+                        net.start_timer("Prediction", use_cuda_events=True)
+                        net.outp_batch_sizes_check(torch_examples[selection],
+                                                   io_dicts[selection]['box_preds'])
+                        dets += net.predict(torch_examples[selection],
+                                            io_dicts[selection])
+                        net.end_timer("Prediction", use_cuda_events=True)
+                        net.cuda_sync_and_calc_elapsed_times()
+                        # io_dicts[selection] = None
+                        # torch_examples[selection] = None
+                    # print(f"detections length: {len(dets)}")
+                    remaining_stages[selection] -= 1
+            net.end_timer(f"{fs} whole pipeline {len(net_selection)} stages")
+
+    t = time.time()
+    detections = straight_eval()
+    # detections = multitask_simulation_eval()
+    sec_per_example = len(eval_dataset) / (time.time() - t)
+    print(f'generate label finished({sec_per_example:.2f}/s). start eval:')
 
     # KU-CSL
     print('all detections length:', len(detections))
 
     # print('After forward, max of all memory_allocated is: ', max(mem_allocs), ' kbytes')
-    print('After forward, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
-    print('After forward, max_memory_allocated is: ', torch.cuda.max_memory_allocated()//1024, ' kbytes')
+    print('After forward, memory_allocated is: ', torch.cuda.memory_allocated() // 1024, ' kbytes')
+    print('After forward, max_memory_allocated is: ', torch.cuda.max_memory_allocated() // 1024, ' kbytes')
 
-    sec_per_example = len(eval_dataset) / (time.time() - t)
-    print(f'generate label finished({sec_per_example:.2f}/s). start eval:')
-    if measure_time:
-        print(
-            f"avg example to torch time: {np.mean(prep_example_times) * 1000:.3f} ms"
-        )
-        print(f"avg prep time: {np.mean(prep_times) * 1000:.3f} ms")
+    # if measure_time:
+    #     print(
+    #         f"avg example to torch time: {np.mean(prep_example_times) * 1000:.3f} ms"
+    #     )
+    #     print(f"avg prep time: {np.mean(prep_times) * 1000:.3f} ms")
+
     for name, val in net.get_avg_time_dict().items():
-        print(f"avg {name} time = {val * 1000:.3f} ms")
-    #with open(result_path_step / "result.pkl", 'wb') as f:
+        print(f"avg {name} time = {val:.3f} ms")
+    # with open(result_path_step / "result.pkl", 'wb') as f:
     #    pickle.dump(detections, f)
     result_dict = eval_dataset.dataset.evaluation(detections,
                                                   str(result_path_step))
-    print('After eval, memory_allocated is: ', torch.cuda.memory_allocated()//1024, ' kbytes')
-    print('After eval, max_memory_allocated is: ', torch.cuda.max_memory_allocated()//1024, ' kbytes')
+    print('After eval, memory_allocated is: ', torch.cuda.memory_allocated() // 1024, ' kbytes')
+    print('After eval, max_memory_allocated is: ', torch.cuda.max_memory_allocated() // 1024, ' kbytes')
 
     if result_dict is not None:
         for k, v in result_dict["results"].items():
             print("Evaluation {}".format(k))
             print(v)
 
+
 def helper_tune_target_assigner(config_path, target_rate=None, update_freq=200, update_delta=0.01, num_tune_epoch=5):
     """get information of target assign to tune thresholds in anchor generator.
-    """    
+    """
     if isinstance(config_path, str):
         # directly provide a config object. this usually used
         # when you want to train with several different parameters in
@@ -618,7 +737,7 @@ def helper_tune_target_assigner(config_path, target_rate=None, update_freq=200, 
         collate_fn=merge_second_batch,
         worker_init_fn=_worker_init_fn,
         drop_last=False)
-    
+
     class_count = {}
     anchor_count = {}
     class_count_tune = {}
@@ -629,7 +748,6 @@ def helper_tune_target_assigner(config_path, target_rate=None, update_freq=200, 
         class_count_tune[c] = 0
         anchor_count_tune[c] = 0
 
-
     step = 0
     classes = target_assigner.classes
     if target_rate is None:
@@ -639,7 +757,7 @@ def helper_tune_target_assigner(config_path, target_rate=None, update_freq=200, 
             gt_names = example["gt_names"]
             for name in gt_names:
                 class_count_tune[name] += 1
-            
+
             labels = example['labels']
             for i in range(1, len(classes) + 1):
                 anchor_count_tune[classes[i - 1]] += int(np.sum(labels == i))
@@ -670,7 +788,7 @@ def helper_tune_target_assigner(config_path, target_rate=None, update_freq=200, 
 
         for name in gt_names:
             class_count[name] += 1
-        
+
         labels = example['labels']
         for i in range(1, len(classes) + 1):
             anchor_count[classes[i - 1]] += int(np.sum(labels == i))
@@ -683,9 +801,10 @@ def helper_tune_target_assigner(config_path, target_rate=None, update_freq=200, 
             if ag.class_name in target_rate:
                 print(ag.class_name, ag.match_threshold, ag.unmatch_threshold)
 
+
 def mcnms_parameters_search(config_path,
-          model_dir,
-          preds_path):
+                            model_dir,
+                            preds_path):
     pass
 
 

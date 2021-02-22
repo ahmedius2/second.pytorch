@@ -173,6 +173,7 @@ class VoxelNet(nn.Module):
             num_input_features=middle_num_input_features,
             num_filters_down1=middle_num_filters_d1,
             num_filters_down2=middle_num_filters_d2)
+        self._rpn_layer_nums = rpn_layer_nums
         self.rpn = rpn.get_rpn_class(rpn_class_name)(
             use_norm=True,
             num_class=num_class,
@@ -190,6 +191,7 @@ class VoxelNet(nn.Module):
             box_code_size=target_assigner.box_coder.code_size,
             num_direction_bins=self._num_direction_bins,
             imprecise_computation=imprecise_computation)
+        self._imprecise_computation = imprecise_computation
         self.rpn_acc = metrics.Accuracy(
             dim=-1, encode_background_as_zeros=encode_background_as_zeros)
         self.rpn_precision = metrics.Precision(dim=-1)
@@ -208,6 +210,7 @@ class VoxelNet(nn.Module):
         self._time_dict = {}
         self._time_total_dict = {}
         self._time_count_dict = {}
+        self._cuda_event_dict = {}
         self._det_num = 1
         self._dump_scores=False
         if self._dump_scores:
@@ -216,25 +219,39 @@ class VoxelNet(nn.Module):
                 if not os.path.exists(mypath):
                     os.makedirs(mypath)
 
-    def start_timer(self, *names):
-        if not self.measure_time:
-            return
-        torch.cuda.synchronize()
-        for name in names:
+    def start_timer(self, name, use_cuda_events=False):
+        if use_cuda_events:
+            assert(name not in self._cuda_event_dict)
+            self._cuda_event_dict[name] = [
+                torch.cuda.Event(enable_timing=True),  # start
+                torch.cuda.Event(enable_timing=True)   # end
+            ]
+            self._cuda_event_dict[name][0].record()
+        else:
             self._time_dict[name] = time.time()
 
-    def end_timer(self, name):
-        if not self.measure_time:
-            return
+    def end_timer(self, name, use_cuda_events=False):
+        if use_cuda_events:
+            self._cuda_event_dict[name][1].record()
+        else:
+            time_elapsed = (time.time() - self._time_dict[name]) * 1000
+            self.save_elapsed_time(name, time_elapsed)
+
+    def cuda_sync_and_calc_elapsed_times(self):
         torch.cuda.synchronize()
-        time_elapsed = time.time() - self._time_dict[name]
+        for name, events in self._cuda_event_dict.items():
+            time_elapsed = events[0].elapsed_time(events[1])
+            self.save_elapsed_time(name, time_elapsed)
+
+        self._cuda_event_dict.clear()
+
+    def save_elapsed_time(self, name, time_elapsed_ms):
         if name not in self._time_count_dict:
             self._time_count_dict[name] = 1
-            self._time_total_dict[name] = time_elapsed
+            self._time_total_dict[name] = [time_elapsed_ms]
         else:
             self._time_count_dict[name] += 1
-            self._time_total_dict[name] += time_elapsed
-        self._time_dict[name] = 0
+            self._time_total_dict[name].append(time_elapsed_ms)
 
     def clear_timer(self):
         self._time_count_dict.clear()
@@ -252,8 +269,13 @@ class VoxelNet(nn.Module):
         ret = {}
         for name, val in self._time_total_dict.items():
             count = self._time_count_dict[name]
-            ret[name] = val / max(1, count)
+            # Remove first 10 elements as cache was cold
+            val = val[10:]
+            ret[name] = sum(val) / max(1, count)
         return ret
+
+    def get_time_dict(self):
+        return self._time_total_dict
 
     def update_global_step(self):
         self.global_step += 1
@@ -346,33 +368,7 @@ class VoxelNet(nn.Module):
             res["dir_loss_reduced"] = multi_outp_loss(dir_loss, br_indexes)
         return res
 
-    def network_forward(self, voxels, num_points, coors, batch_size):
-        """this function is used for subclass.
-        you can add custom network architecture by subclass VoxelNet class
-        and override this function.
-        Returns: 
-            preds_dict: {
-                box_preds: ...
-                cls_preds: ...
-                dir_cls_preds: ...
-            }
-        """
-        self.start_timer("voxel_feature_extractor")
-        voxel_features = self.voxel_feature_extractor(voxels, num_points, coors)
-        self.end_timer("voxel_feature_extractor")
-
-        self.start_timer("middle forward")
-        spatial_features = self.middle_feature_extractor(voxel_features, coors, batch_size)
-        self.end_timer("middle forward")
-        self.start_timer("rpn forward")
-        self.rpn.set_mode_training() if self.training else self.rpn.set_mode_evaluation()
-        preds_dict = self.rpn(spatial_features)
-        self.end_timer("rpn forward")
-        return preds_dict
-
-    def forward(self, example):
-        """module's forward should always accept dict and return loss.
-        """
+    def forward_pfe(self, example):
         voxels = example["voxels"]
         num_points = example["num_points"]
         coors = example["coordinates"]
@@ -389,13 +385,67 @@ class VoxelNet(nn.Module):
             num_points = torch.cat(num_points_list, dim=0)
             coors = torch.cat(coors_list, dim=0)
 
-        batch_anchors = example["anchors"]
-        batch_size_dev = batch_anchors.shape[0]
         # features: [num_voxels, max_num_points_per_voxel, 7]
         # num_points: [num_voxels]
         # coors: [num_voxels, 4]
-        preds_dict = self.network_forward(voxels, num_points, coors, batch_size_dev)
-        # need to check size.
+
+        voxel_features = self.voxel_feature_extractor(voxels, num_points, coors)
+        batch_anchors = example["anchors"]
+        batch_size_dev = batch_anchors.shape[0]
+        spatial_features = self.middle_feature_extractor(voxel_features, coors, batch_size_dev)
+
+        inp_outp_dict = {
+            "stage0": spatial_features,
+            "stages_executed": 0,
+        }
+
+        return inp_outp_dict
+
+
+    def forward_rpn(self, inp_outp_dict):
+        """this function is used for subclass.
+        you can add custom network architecture by subclass VoxelNet class
+        and override this function.
+        Returns:
+            preds_dict: {
+                box_preds: ...
+                cls_preds: ...
+                dir_cls_preds: ...
+            }
+        """
+
+        self.rpn.set_mode_training() if self.training else self.rpn.set_mode_evaluation()
+        preds_dict = self.rpn(inp_outp_dict["stage0"])
+        return preds_dict
+
+    def forward_rpn_stage(self, inp_outp_dict):
+        assert(inp_outp_dict["stages_executed"] < len(self._rpn_layer_nums))
+
+        return self.rpn.forward_stage(inp_outp_dict)
+
+    def outp_batch_sizes_check(self, example, box_preds):
+        batch_anchors = example["anchors"]
+        batch_size_dev = batch_anchors.shape[0]
+
+        box_preds = box_preds.view(batch_size_dev, -1, self._box_coder.code_size)
+        err_msg = f"num_anchors={batch_anchors.shape[1]}, but num_output={box_preds.shape[1]}. please check size"
+        assert batch_anchors.shape[1] == box_preds.shape[1], err_msg
+
+        return
+
+    def forward(self, example):
+        """module's forward should always accept dict and return loss.
+        """
+        inp_outp_dict = self.forward_pfe(example)
+
+        # features: [num_voxels, max_num_points_per_voxel, 7]
+        # num_points: [num_voxels]
+        # coors: [num_voxels, 4]
+        preds_dict = self.forward_rpn(inp_outp_dict)
+
+        batch_anchors = example["anchors"]
+        batch_size_dev = batch_anchors.shape[0]
+
         if self.training:
             box_preds = []
             for i in range(self.rpn.get_stages_to_execute()):
@@ -414,13 +464,55 @@ class VoxelNet(nn.Module):
         if self.training:
             return self.loss(example, preds_dict)
         else:
-            self.start_timer("predict")
             with torch.no_grad():
                 res = self.predict(example, preds_dict)
-            self.end_timer("predict")
             return res
 
-    def predict(self, example, preds_dict):
+    def calc_mean_of_scores(self, total_scores):
+        top_scores_keep = total_scores >= self._nms_score_thresholds[0]
+        top_scores = total_scores.masked_select(top_scores_keep)
+        if top_scores.size()[0] > 0:
+            return float(torch.mean(top_scores).cpu().numpy())
+        else:
+            return float(0)
+
+    def calc_total_scores(self, example, inp_outp_dict):
+        batch_size = example['anchors'].shape[0]
+
+        if "anchors_mask" not in example:
+            batch_anchors_mask = [None] * batch_size
+        else:
+            batch_anchors_mask = example["anchors_mask"].view(batch_size, -1)
+
+        batch_cls_preds = inp_outp_dict["cls_preds"]
+        num_class_with_bg = self._num_class
+        if not self._encode_background_as_zeros:
+            num_class_with_bg = self._num_class + 1
+
+        batch_cls_preds = batch_cls_preds.view(
+            batch_size, -1, num_class_with_bg).float()
+        batch_total_scores = []
+
+        for cls_preds, a_mask in zip(batch_cls_preds, batch_anchors_mask):
+            if a_mask is not None:
+                cls_preds = cls_preds[a_mask]
+
+            cls_preds = cls_preds.float()
+
+            if self._encode_background_as_zeros:
+                # this don't support softmax
+                assert self._use_sigmoid_score is True
+                total_scores = torch.sigmoid(cls_preds)
+            else:
+                # encode background as first element in one-hot vector
+                if self._use_sigmoid_score:
+                    total_scores = torch.sigmoid(cls_preds)[..., 1:]
+                else:
+                    total_scores = F.softmax(cls_preds, dim=-1)[..., 1:]
+            batch_total_scores.append(total_scores)
+        return batch_total_scores
+
+    def predict(self, example, preds_dict, batch_total_scores=None):
         """start with v1.6.0, this function don't contain any kitti-specific code.
         Returns:
             predict: list of pred_dict.
@@ -438,6 +530,7 @@ class VoxelNet(nn.Module):
             meta_list = [None] * batch_size
         else:
             meta_list = example["metadata"]
+
         batch_anchors = example["anchors"].view(batch_size, -1,
                                                 example["anchors"].shape[-1])
         if "anchors_mask" not in example:
@@ -445,17 +538,17 @@ class VoxelNet(nn.Module):
         else:
             batch_anchors_mask = example["anchors_mask"].view(batch_size, -1)
 
-        t = time.time()
+        # t = time.time()
         batch_box_preds = preds_dict["box_preds"]
-        batch_cls_preds = preds_dict["cls_preds"]
+        # batch_cls_preds = preds_dict["cls_preds"]
         batch_box_preds = batch_box_preds.view(batch_size, -1,
                                                self._box_coder.code_size)
         num_class_with_bg = self._num_class
         if not self._encode_background_as_zeros:
             num_class_with_bg = self._num_class + 1
 
-        batch_cls_preds = batch_cls_preds.view(batch_size, -1,
-                                               num_class_with_bg)
+        # batch_cls_preds = batch_cls_preds.view(batch_size, -1,
+        #                                        num_class_with_bg)
         batch_box_preds = self._box_coder.decode_torch(batch_box_preds,
                                                        batch_anchors)
         if self._use_direction_classifier:
@@ -472,31 +565,34 @@ class VoxelNet(nn.Module):
                 self._post_center_range,
                 dtype=batch_box_preds.dtype,
                 device=batch_box_preds.device).float()
-        for box_preds, cls_preds, dir_preds, a_mask, meta in zip(
-                batch_box_preds, batch_cls_preds, batch_dir_preds,
+        if batch_total_scores == None:
+            batch_total_scores = self.calc_total_scores(example, preds_dict)
+
+        for box_preds, total_scores, dir_preds, a_mask, meta in zip(
+                batch_box_preds, batch_total_scores, batch_dir_preds,
                 batch_anchors_mask, meta_list):
 
             if a_mask is not None:
                 box_preds = box_preds[a_mask]
-                cls_preds = cls_preds[a_mask]
+                # cls_preds = cls_preds[a_mask]
             box_preds = box_preds.float()
 
-            cls_preds = cls_preds.float()
+            # cls_preds = cls_preds.float()
             if self._use_direction_classifier:
                 if a_mask is not None:
                     dir_preds = dir_preds[a_mask]
                 dir_labels = torch.max(dir_preds, dim=-1)[1]
 
-            if self._encode_background_as_zeros:
-                # this don't support softmax
-                assert self._use_sigmoid_score is True
-                total_scores = torch.sigmoid(cls_preds)
-            else:
-                # encode background as first element in one-hot vector
-                if self._use_sigmoid_score:
-                    total_scores = torch.sigmoid(cls_preds)[..., 1:]
-                else:
-                    total_scores = F.softmax(cls_preds, dim=-1)[..., 1:]
+            # if self._encode_background_as_zeros:
+            #     # this don't support softmax
+            #     assert self._use_sigmoid_score is True
+            #     total_scores = torch.sigmoid(cls_preds)
+            # else:
+            #     # encode background as first element in one-hot vector
+            #     if self._use_sigmoid_score:
+            #         total_scores = torch.sigmoid(cls_preds)[..., 1:]
+            #     else:
+            #         total_scores = F.softmax(cls_preds, dim=-1)[..., 1:]
 
             # save scores to file
             if self._dump_scores:
