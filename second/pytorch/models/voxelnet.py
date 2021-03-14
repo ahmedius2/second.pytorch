@@ -18,23 +18,26 @@ from second.pytorch.utils import torch_timer
 import pickle
 import os
 
+
 def select_branches_for_loss(num_tensors):
     zero_scale = 4.
     probs = [zero_scale * 10., 10.]
     probs_normalized = probs / np.sum(probs)
-    br_indexes=[]
-    for i in range(num_tensors-1):
+    br_indexes = []
+    for i in range(num_tensors - 1):
         # randomly returns [0] or [1] depending on given probabilities
         if np.random.choice(2, 1, p=probs_normalized)[0] == 1:
             br_indexes.append(i)
     # always select the last branch
-    return br_indexes + [num_tensors-1]
+    return br_indexes + [num_tensors - 1]
+
 
 def multi_outp_loss(loss_tensors, br_indexes):
     result_loss_tensor = loss_tensors[0].new_zeros(loss_tensors[0].size())
     for i in br_indexes:
         result_loss_tensor.add_(loss_tensors[i])
     return result_loss_tensor / len(br_indexes)
+
 
 def _get_pos_neg_loss(cls_loss, labels):
     # cls_loss: [N, num_anchors, num_class]
@@ -52,7 +55,9 @@ def _get_pos_neg_loss(cls_loss, labels):
         cls_neg_loss = cls_loss[..., 0].sum() / batch_size
     return cls_pos_loss, cls_neg_loss
 
+
 REGISTERED_NETWORK_CLASSES = {}
+
 
 def register_voxelnet(cls, name=None):
     global REGISTERED_NETWORK_CLASSES
@@ -62,16 +67,19 @@ def register_voxelnet(cls, name=None):
     REGISTERED_NETWORK_CLASSES[name] = cls
     return cls
 
+
 def get_voxelnet_class(name):
     global REGISTERED_NETWORK_CLASSES
     assert name in REGISTERED_NETWORK_CLASSES, f"available class: {REGISTERED_NETWORK_CLASSES}"
     return REGISTERED_NETWORK_CLASSES[name]
+
 
 class LossNormType(Enum):
     NormByNumPositives = "norm_by_num_positives"
     NormByNumExamples = "norm_by_num_examples"
     NormByNumPosNeg = "norm_by_num_pos_neg"
     DontNorm = "dont_norm"
+
 
 @register_voxelnet
 class VoxelNet(nn.Module):
@@ -123,8 +131,7 @@ class VoxelNet(nn.Module):
                  nms_class_agnostic=False,
                  num_direction_bins=2,
                  direction_limit_offset=0,
-                 name='voxelnet',
-                 imprecise_computation=False):
+                 name='voxelnet'):
         super().__init__()
         self.name = name
         self._sin_error_factor = sin_error_factor
@@ -189,9 +196,7 @@ class VoxelNet(nn.Module):
             use_groupnorm=use_groupnorm,
             num_groups=num_groups,
             box_code_size=target_assigner.box_coder.code_size,
-            num_direction_bins=self._num_direction_bins,
-            imprecise_computation=imprecise_computation)
-        self._imprecise_computation = imprecise_computation
+            num_direction_bins=self._num_direction_bins)
         self.rpn_acc = metrics.Accuracy(
             dim=-1, encode_background_as_zeros=encode_background_as_zeros)
         self.rpn_precision = metrics.Precision(dim=-1)
@@ -212,19 +217,19 @@ class VoxelNet(nn.Module):
         self._time_count_dict = {}
         self._cuda_event_dict = {}
         self._det_num = 1
-        self._dump_scores=False
+        self._dump_scores = False
         if self._dump_scores:
-            for i in range(1, len(rpn_layer_nums)+1):
-                mypath = os.getenv('HOME')+"/scores_"+str(i)
+            for i in range(1, len(rpn_layer_nums) + 1):
+                mypath = os.getenv('HOME') + "/scores_" + str(i)
                 if not os.path.exists(mypath):
                     os.makedirs(mypath)
 
     def start_timer(self, name, use_cuda_events=False):
         if use_cuda_events:
-            assert(name not in self._cuda_event_dict)
+            assert (name not in self._cuda_event_dict)
             self._cuda_event_dict[name] = [
                 torch.cuda.Event(enable_timing=True),  # start
-                torch.cuda.Event(enable_timing=True)   # end
+                torch.cuda.Event(enable_timing=True)  # end
             ]
             self._cuda_event_dict[name][0].record()
         else:
@@ -275,7 +280,15 @@ class VoxelNet(nn.Module):
         return ret
 
     def get_time_dict(self):
-        return self._time_total_dict
+        ret = {}
+        for name, val in self._time_total_dict.items():
+            # Remove first 10 elements as cache was cold
+            count = self._time_count_dict[name] - 10
+            val = val[10:]
+            ret[name] = [min(val),
+                         sum(val) / max(1, count),  # avg
+                         max(val)]  # max
+        return ret
 
     def update_global_step(self):
         self.global_step += 1
@@ -306,10 +319,10 @@ class VoxelNet(nn.Module):
         cls_targets = cls_targets.unsqueeze(-1)
         self.end_timer("prepare weight forward")
         self.start_timer("create_loss forward")
-        num_stages = self.rpn.get_stages_to_execute()
-        loc_loss, cls_loss, loc_loss_reduced, cls_pos_loss, cls_neg_loss, cls_loss_reduced, loss, dir_loss =\
-            [0]*num_stages, [0]*num_stages, [0]*num_stages, [0]*num_stages, [0]*num_stages, [0]*num_stages,\
-            [0]*num_stages, [0]*num_stages
+        num_stages = 3  # num rpn blocks
+        loc_loss, cls_loss, loc_loss_reduced, cls_pos_loss, cls_neg_loss, cls_loss_reduced, loss, dir_loss = \
+            [0] * num_stages, [0] * num_stages, [0] * num_stages, [0] * num_stages, [0] * num_stages, [0] * num_stages, \
+            [0] * num_stages, [0] * num_stages
         for branch in range(num_stages):
             loc_loss[branch], cls_loss[branch] = create_loss(
                 self._loc_loss_ftor,
@@ -369,6 +382,7 @@ class VoxelNet(nn.Module):
         return res
 
     def forward_pfe(self, example):
+        self.start_timer("Voxel feature extractor", use_cuda_events=True)
         voxels = example["voxels"]
         num_points = example["num_points"]
         coors = example["coordinates"]
@@ -388,11 +402,13 @@ class VoxelNet(nn.Module):
         # features: [num_voxels, max_num_points_per_voxel, 7]
         # num_points: [num_voxels]
         # coors: [num_voxels, 4]
-
         voxel_features = self.voxel_feature_extractor(voxels, num_points, coors)
+        self.end_timer("Voxel feature extractor", use_cuda_events=True)
+        self.start_timer("middle forward", use_cuda_events=True)
         batch_anchors = example["anchors"]
         batch_size_dev = batch_anchors.shape[0]
         spatial_features = self.middle_feature_extractor(voxel_features, coors, batch_size_dev)
+        self.end_timer("middle forward", use_cuda_events=True)
 
         inp_outp_dict = {
             "stage0": spatial_features,
@@ -400,7 +416,6 @@ class VoxelNet(nn.Module):
         }
 
         return inp_outp_dict
-
 
     def forward_rpn(self, inp_outp_dict):
         """this function is used for subclass.
@@ -419,9 +434,15 @@ class VoxelNet(nn.Module):
         return preds_dict
 
     def forward_rpn_stage(self, inp_outp_dict):
-        assert(inp_outp_dict["stages_executed"] < len(self._rpn_layer_nums))
+        assert (inp_outp_dict["stages_executed"] < len(self._rpn_layer_nums))
 
-        return self.rpn.forward_stage(inp_outp_dict)
+        self.start_timer(f"RPN stage {inp_outp_dict['stages_executed']} "
+                         f"forward", use_cuda_events=True)
+        res = self.rpn.forward_stage(inp_outp_dict)
+        self.end_timer(f"RPN stage {inp_outp_dict['stages_executed'] - 1} "
+                       f"forward", use_cuda_events=True)
+
+        return res
 
     def outp_batch_sizes_check(self, example, box_preds):
         batch_anchors = example["anchors"]
@@ -448,7 +469,7 @@ class VoxelNet(nn.Module):
 
         if self.training:
             box_preds = []
-            for i in range(self.rpn.get_stages_to_execute()):
+            for i in range(3):  # rpn_stages
                 box_preds.append(preds_dict["box_preds"][i].view(batch_size_dev, -1, self._box_coder.code_size))
             box_preds = torch.stack(box_preds)
         else:
@@ -468,15 +489,21 @@ class VoxelNet(nn.Module):
                 res = self.predict(example, preds_dict)
             return res
 
-    def calc_mean_of_scores(self, total_scores):
+    def calc_mean_of_scores(self, total_scores, get_scores=False):
+        self.start_timer("Scores mean calc", use_cuda_events=True)
+
         top_scores_keep = total_scores >= self._nms_score_thresholds[0]
         top_scores = total_scores.masked_select(top_scores_keep)
         if top_scores.size()[0] > 0:
-            return float(torch.mean(top_scores).cpu().numpy())
+            ret = float(torch.mean(top_scores).cpu().numpy())
         else:
-            return float(0)
+            ret = float(0)
+        self.end_timer("Scores mean calc", use_cuda_events=True)
+        return ret, top_scores_keep.cpu().numpy()
 
-    def calc_total_scores(self, example, inp_outp_dict):
+    def calc_total_scores(self, example, inp_outp_dict, get_cls_img=False):
+        self.start_timer("Total scores calc", use_cuda_events=True)
+
         batch_size = example['anchors'].shape[0]
 
         if "anchors_mask" not in example:
@@ -484,7 +511,36 @@ class VoxelNet(nn.Module):
         else:
             batch_anchors_mask = example["anchors_mask"].view(batch_size, -1)
 
+        def get_scores(cls_preds):
+            if self._encode_background_as_zeros:
+                # this don't support softmax
+                assert self._use_sigmoid_score is True
+                total_scores = torch.sigmoid(cls_preds)
+            else:
+                # encode background as first element in one-hot vector
+                if self._use_sigmoid_score:
+                    total_scores = torch.sigmoid(cls_preds)[..., 1:]
+                else:
+                    total_scores = F.softmax(cls_preds, dim=-1)[..., 1:]
+            return total_scores
+
         batch_cls_preds = inp_outp_dict["cls_preds"]
+
+        # DEBUG
+        # for cls_preds, a_mask in zip(batch_cls_preds, batch_anchors_mask):
+        #     if a_mask is not None:
+        #         cls_preds = cls_preds[a_mask]
+
+        batch_cls_preds = batch_cls_preds.float()
+        total_scores = get_scores(batch_cls_preds)
+        # print("total_scores:", type(total_scores), total_scores.shape)
+        cls_images, indices = torch.max(total_scores, 1)
+        # cls_images = total_scores
+
+        # print("cls_images max:", type(cls_images), cls_images.shape)
+        # print(total_scores)
+        # DEBUG END
+
         num_class_with_bg = self._num_class
         if not self._encode_background_as_zeros:
             num_class_with_bg = self._num_class + 1
@@ -498,19 +554,16 @@ class VoxelNet(nn.Module):
                 cls_preds = cls_preds[a_mask]
 
             cls_preds = cls_preds.float()
+            total_scores = get_scores(cls_preds)
+            # print("total_scores 2:", type(total_scores), total_scores.shape)
+            # print(total_scores)
 
-            if self._encode_background_as_zeros:
-                # this don't support softmax
-                assert self._use_sigmoid_score is True
-                total_scores = torch.sigmoid(cls_preds)
-            else:
-                # encode background as first element in one-hot vector
-                if self._use_sigmoid_score:
-                    total_scores = torch.sigmoid(cls_preds)[..., 1:]
-                else:
-                    total_scores = F.softmax(cls_preds, dim=-1)[..., 1:]
             batch_total_scores.append(total_scores)
-        return batch_total_scores
+        self.end_timer("Total scores calc", use_cuda_events=True)
+        if get_cls_img:
+            return batch_total_scores, cls_images
+        else:
+            return batch_total_scores
 
     def predict(self, example, preds_dict, batch_total_scores=None):
         """start with v1.6.0, this function don't contain any kitti-specific code.
@@ -525,6 +578,9 @@ class VoxelNet(nn.Module):
                     for nuscenes, sample_token is saved in it.
             }
         """
+        self.start_timer("Prediction", use_cuda_events=True)
+        self.outp_batch_sizes_check(example, preds_dict["box_preds"])
+
         batch_size = example['anchors'].shape[0]
         if "metadata" not in example or len(example["metadata"]) == 0:
             meta_list = [None] * batch_size
@@ -577,28 +633,17 @@ class VoxelNet(nn.Module):
                 # cls_preds = cls_preds[a_mask]
             box_preds = box_preds.float()
 
-            # cls_preds = cls_preds.float()
             if self._use_direction_classifier:
                 if a_mask is not None:
                     dir_preds = dir_preds[a_mask]
                 dir_labels = torch.max(dir_preds, dim=-1)[1]
 
-            # if self._encode_background_as_zeros:
-            #     # this don't support softmax
-            #     assert self._use_sigmoid_score is True
-            #     total_scores = torch.sigmoid(cls_preds)
-            # else:
-            #     # encode background as first element in one-hot vector
-            #     if self._use_sigmoid_score:
-            #         total_scores = torch.sigmoid(cls_preds)[..., 1:]
-            #     else:
-            #         total_scores = F.softmax(cls_preds, dim=-1)[..., 1:]
-
             # save scores to file
             if self._dump_scores:
-                pickle.dump(total_scores, open(os.getenv('HOME')+"/scores_"
-                    +str(self.rpn.get_stages_to_execute())+"/det_"
-                    +str(self._det_num)+".pickle", "wb"), protocol=0)
+                num_rpn_blocks = 3
+                pickle.dump(total_scores, open(os.getenv('HOME') + "/scores_"
+                                               + str(num_rpn_blocks) + "/det_"
+                                               + str(self._det_num) + ".pickle", "wb"), protocol=0)
             self._det_num += 1
 
             # Apply NMS in birdeye view
@@ -607,7 +652,7 @@ class VoxelNet(nn.Module):
             else:
                 nms_func = box_torch_ops.nms
             feature_map_size_prod = batch_box_preds.shape[
-                1] // self.target_assigner.num_anchors_per_location
+                                        1] // self.target_assigner.num_anchors_per_location
             if self._multiclass_nms:
                 assert self._encode_background_as_zeros is True
                 boxes_for_nms = box_preds[:, [0, 1, 3, 4, 6]]
@@ -647,12 +692,12 @@ class VoxelNet(nn.Module):
                             -1,
                             self._num_class)[anchors_range[0]:anchors_range[1], class_idx]
                         class_boxes_nms = boxes.view(-1,
-                            boxes_for_nms.shape[-1])[anchors_range[0]:anchors_range[1], :]
+                                                     boxes_for_nms.shape[-1])[anchors_range[0]:anchors_range[1], :]
                         class_scores = class_scores.contiguous().view(-1)
                         class_boxes_nms = class_boxes_nms.contiguous().view(
                             -1, boxes_for_nms.shape[-1])
                         class_boxes = box_preds.view(-1,
-                            box_preds.shape[-1])[anchors_range[0]:anchors_range[1], :]
+                                                     box_preds.shape[-1])[anchors_range[0]:anchors_range[1], :]
                         class_boxes = class_boxes.contiguous().view(
                             -1, box_preds.shape[-1])
                         if self._use_direction_classifier:
@@ -758,7 +803,7 @@ class VoxelNet(nn.Module):
                     box_preds[
                         ...,
                         6] = dir_rot + self._dir_offset + period * dir_labels.to(
-                            box_preds.dtype)
+                        box_preds.dtype)
                 final_box_preds = box_preds
                 final_scores = scores
                 final_labels = label_preds
@@ -785,17 +830,18 @@ class VoxelNet(nn.Module):
                 device = batch_box_preds.device
                 predictions_dict = {
                     "box3d_lidar":
-                    torch.zeros([0, box_preds.shape[-1]],
-                                dtype=dtype,
-                                device=device),
+                        torch.zeros([0, box_preds.shape[-1]],
+                                    dtype=dtype,
+                                    device=device),
                     "scores":
-                    torch.zeros([0], dtype=dtype, device=device),
+                        torch.zeros([0], dtype=dtype, device=device),
                     "label_preds":
-                    torch.zeros([0], dtype=top_labels.dtype, device=device),
+                        torch.zeros([0], dtype=top_labels.dtype, device=device),
                     "metadata":
-                    meta,
+                        meta,
                 }
             predictions_dicts.append(predictions_dict)
+        self.end_timer("Prediction", use_cuda_events=True)
         return predictions_dicts
 
     def metrics_to_float(self):
@@ -810,8 +856,8 @@ class VoxelNet(nn.Module):
         num_class = self._num_class
         if not self._encode_background_as_zeros:
             num_class += 1
-        num_stages = self.rpn.get_stages_to_execute()
-        rpn_acc, prec, recall = [0]*num_stages, [0]*num_stages, [0]*num_stages
+        num_stages = 3  # num rpn blocks
+        rpn_acc, prec, recall = [0] * num_stages, [0] * num_stages, [0] * num_stages
         all_cls_preds = torch.chunk(cls_preds, num_stages)
         for i in range(num_stages):
             cls_preds_tmp = all_cls_preds[i].view(batch_size, -1, num_class)
@@ -833,8 +879,8 @@ class VoxelNet(nn.Module):
             "pr": {},
         }
         for i, thresh in enumerate(self.rpn_metrics.thresholds):
-            ret["pr"][f"prec@{int(thresh*100)}"] = float(prec[i])
-            ret["pr"][f"rec@{int(thresh*100)}"] = float(recall[i])
+            ret["pr"][f"prec@{int(thresh * 100)}"] = float(prec[i])
+            ret["pr"][f"rec@{int(thresh * 100)}"] = float(recall[i])
         return ret
 
     def clear_metrics(self):
@@ -853,7 +899,7 @@ class VoxelNet(nn.Module):
         Returns:
 
         """
-        assert(not self.training or (self.training and num_stages <= 3))
+        assert (not self.training or (self.training and num_stages <= 3))
         self.rpn.set_stages_to_execute(num_stages)
 
     @staticmethod

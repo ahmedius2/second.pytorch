@@ -20,7 +20,7 @@ from second.pytorch.builder import losses_builder
 from second.pytorch.models.voxelnet import LossNormType, get_voxelnet_class
 
 def build(model_cfg: second_pb2.VoxelNet, voxel_generator,
-          target_assigner, measure_time=False, imprecise_computation=False):
+          target_assigner, measure_time=False):
     """build second pytorch instance.
     """
     if not isinstance(model_cfg, second_pb2.VoxelNet):
@@ -128,7 +128,6 @@ def build(model_cfg: second_pb2.VoxelNet, voxel_generator,
         sin_error_factor=sin_error_factor,
         nms_class_agnostic=model_cfg.nms_class_agnostic,
         num_direction_bins=model_cfg.num_direction_bins,
-        direction_limit_offset=model_cfg.direction_limit_offset,
-        imprecise_computation=imprecise_computation
+        direction_limit_offset=model_cfg.direction_limit_offset
     )
     return net

@@ -168,7 +168,7 @@ def build_network_():
     with open(cfg_path, "r") as f:
         proto_str = f.read()
         text_format.Merge(proto_str, config)
-    device = device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     net = build_network(config.model.second, measure_time=False, imprecise_computation=True).to(device).float().eval()
     net.load_state_dict(torch.load(ckpt_path))
     eval_input_cfg = config.eval_input_reader
@@ -207,7 +207,7 @@ def inference_by_idx():
     # don't forget to add newaxis for anchors
     example["anchors"] = example["anchors"][np.newaxis, ...]
     example_torch = example_convert_to_torch(example, device=BACKEND.device)
-    pred = BACKEND.net(example_torch)[0]
+    pred = BACKEND.net(example_torch)[0]  # calls forward function
     box3d = pred["box3d_lidar"].detach().cpu().numpy()
     locs = box3d[:, :3]
     dims = box3d[:, 3:6]

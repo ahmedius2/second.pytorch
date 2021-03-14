@@ -10,6 +10,7 @@ import fire
 import numpy as np
 import torch
 from google.protobuf import text_format
+import matplotlib.pyplot as plt
 
 import second.data.kitti_common as kitti
 import torchplus
@@ -56,7 +57,7 @@ def example_convert_to_torch(example, dtype=torch.float32,
     return example_torch
 
 
-def build_network(model_cfg, measure_time=False, imprecise_computation=False):
+def build_network(model_cfg, measure_time=False):
     voxel_generator = voxel_builder.build(model_cfg.voxel_generator)
     bv_range = voxel_generator.point_cloud_range[[0, 1, 3, 4]]
     box_coder = box_coder_builder.build(model_cfg.box_coder)
@@ -65,8 +66,7 @@ def build_network(model_cfg, measure_time=False, imprecise_computation=False):
                                                     bv_range, box_coder)
     box_coder.custom_ndim = target_assigner._anchor_generators[0].custom_ndim
     net = second_builder.build(
-        model_cfg, voxel_generator, target_assigner, measure_time=measure_time,
-        imprecise_computation=imprecise_computation)
+        model_cfg, voxel_generator, target_assigner, measure_time=measure_time)
     return net
 
 
@@ -146,8 +146,7 @@ def train(config_path,
           freeze_exclude=None,
           multi_gpu=False,
           measure_time=False,
-          resume=False,
-          imprecise_computation=False):
+          resume=False):
     """train a VoxelNet model specified by a config file.
     """
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -182,7 +181,7 @@ def train(config_path,
     model_cfg = config.model.second
     train_cfg = config.train_config
 
-    net = build_network(model_cfg, measure_time, imprecise_computation=imprecise_computation).to(device)
+    net = build_network(model_cfg, measure_time).to(device)
     # if train_cfg.enable_mixed_precision:
     #     net.half()
     #     net.metrics_to_float()
@@ -317,6 +316,7 @@ def train(config_path,
                 batch_size = example["anchors"].shape[0]
 
                 ret_dict = net_parallel(example_torch)
+                net.cuda_sync_and_calc_elapsed_times()
                 cls_preds = ret_dict["cls_preds"]
                 loss = ret_dict["loss"].mean()
                 cls_loss_reduced = ret_dict["cls_loss_reduced"].mean()
@@ -449,7 +449,6 @@ def evaluate(config_path,
              ckpt_path=None,
              measure_time=False,
              batch_size=None,
-             imprecise_computation=False,
              **kwargs):
     """Don't support pickle_result anymore. if you want to generate kitti label file,
     please use kitti_anno_to_label_file and convert_detection_to_kitti_annos
@@ -479,7 +478,7 @@ def evaluate(config_path,
     model_cfg = config.model.second
     train_cfg = config.train_config
 
-    net = build_network(model_cfg, measure_time=measure_time, imprecise_computation=imprecise_computation).to(device)
+    net = build_network(model_cfg, measure_time=measure_time).to(device)
     if train_cfg.enable_mixed_precision:
         net.half()
         print("half inference!")
@@ -550,27 +549,38 @@ def evaluate(config_path,
             example = example_convert_to_torch(example, float_dtype)
             net.end_timer("example to torch", use_cuda_events=True)
             with torch.no_grad():
-                net.start_timer("Pillar feature net", use_cuda_events=True)
                 io_dict = net.forward_pfe(example)
-                net.end_timer("Pillar feature net", use_cuda_events=True)
                 for i in range(num_stages):
-                    net.start_timer(f"RPN stage {i} forward", use_cuda_events=True)
                     io_dict = net.forward_rpn_stage(io_dict)
-                    net.end_timer(f"RPN stage {i} forward", use_cuda_events=True)
+                    # Taking a view of contiguous tensor could potentially produce a non-contiguous tensor.
+                    # Users should be pay additional attention as contiguity
+                    # might have implicit performance impact
+                    # sz = io_dict[f"stage{i+1}"].size()
+                    # Last two dimensions represent the area
+                    # print(f"Stage {i+1} output size:", io_dict[f"stage{i+1}"].size())
+
                     if i < num_stages - 1:
-                        net.start_timer(f"Score mean calc {i}", use_cuda_events=True)
-                        batch_total_scores = net.calc_total_scores(
-                            example, io_dict)
+                        batch_total_scores, batch_cls_images = \
+                            net.calc_total_scores(example, io_dict, True)
+                        # Display class image
+                        # batch_cls_images = batch_cls_images.cpu().numpy()
+                        # for image in batch_cls_images:
+                        #     print(image.shape)
+                            # for i in range(image.shape[-1]):
+                            # for j in range(image.shape[0]):
+                            #     print("anchor", j, "class", i)
+                            # data = image[:, :, 1]
+                            # print(np.max(data), np.min(data))
+                            # data = np.around(data)
+                            # print(np.max(data), np.min(data))
+                            # plt.imshow(data, cmap='gray')
+                            # print(data)
+                            # plt.show()
                         for ttl_scores in batch_total_scores:
                             _ = net.calc_mean_of_scores(ttl_scores)  # for overhead
-                        net.end_timer(f"Score mean calc {i}", use_cuda_events=True)
                         net.cuda_sync_and_calc_elapsed_times()
-                net.start_timer("Prediction", use_cuda_events=True)
-                net.outp_batch_sizes_check(example, io_dict["box_preds"])
                 dets += net.predict(example, io_dict)
-                net.end_timer("Prediction", use_cuda_events=True)
                 net.cuda_sync_and_calc_elapsed_times()
-                torch.cuda.synchronize()
             net.end_timer("Whole pipeline")
 
             bar.print_bar()
@@ -678,8 +688,9 @@ def evaluate(config_path,
     #     )
     #     print(f"avg prep time: {np.mean(prep_times) * 1000:.3f} ms")
 
-    for name, val in net.get_avg_time_dict().items():
-        print(f"avg {name} time = {val:.3f} ms")
+    for name, val in net.get_time_dict().items():
+        print(f"{name} time, min = {val[0]:.3f} ms,"
+              f" avf = {val[1]:.3f} ms, max = {val[2]:.3f} ms")
     # with open(result_path_step / "result.pkl", 'wb') as f:
     #    pickle.dump(detections, f)
     result_dict = eval_dataset.dataset.evaluation(detections,

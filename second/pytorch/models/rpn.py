@@ -155,6 +155,7 @@ class RPN(nn.Module):
             num_cls = num_anchor_per_loc * num_class
         else:
             num_cls = num_anchor_per_loc * (num_class + 1)
+            num_class += 1
         self.conv_cls = nn.Conv2d(sum(num_upsample_filters), num_cls, 1)
         self.conv_box = nn.Conv2d(
             sum(num_upsample_filters), num_anchor_per_loc * box_code_size, 1)
@@ -365,8 +366,7 @@ class RPNBase(RPNNoHeadBase):
                  num_groups=32,
                  box_code_size=7,
                  num_direction_bins=2,
-                 name='rpn',
-                 imprecise_computation=False):
+                 name='rpn'):
         """upsample_strides support float: [0.25, 0.5, 1]
         if upsample_strides < 1, conv2d will be used instead of convtranspose2d.
         """
@@ -393,51 +393,41 @@ class RPNBase(RPNNoHeadBase):
         self._num_class = num_class
         self._use_direction_classifier = use_direction_classifier
         self._box_code_size = box_code_size
-        self._imprecise_computation = imprecise_computation
         self._training = True
 
         if encode_background_as_zeros:
             num_cls = num_anchor_per_loc * num_class
         else:
             num_cls = num_anchor_per_loc * (num_class + 1)
+            self._num_class += 1
         if len(num_upsample_filters) == 0:
             final_num_filters = self._num_out_filters
         else:
             final_num_filters = sum(num_upsample_filters)
         # I need three different versions of these three convolutions
         # Each of them being for 1, 2 or 3 stages
-        print('self._imprecise_computation:', self._imprecise_computation)
-        if self._imprecise_computation:
-            print('Building RPN with ability to do imprecise computation')
-            # assert len(num_upsample_filters) == 3
-            self.conv_cls1, self.conv_cls2, self.conv_cls3 = None, None, None
-            self.conv_cls_alternatives = [self.conv_cls1, self.conv_cls2, self.conv_cls3]
-            self.conv_box1, self.conv_box2, self.conv_box3 = None, None, None
-            self.conv_box_alternatives = [self.conv_box1, self.conv_box2, self.conv_box3]
-            for i in range(1, len(num_upsample_filters) + 1):
-                self.conv_cls_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]), num_cls, 1)
-                self.conv_box_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]),
-                                                              num_anchor_per_loc * box_code_size, 1)
-            self.conv_cls1, self.conv_cls2, self.conv_cls3 = self.conv_cls_alternatives[:]
-            self.conv_box1, self.conv_box2, self.conv_box3 = self.conv_box_alternatives[:]
+        print('Building RPN with ability to do imprecise computation')
+        # assert len(num_upsample_filters) == 3
+        self.conv_cls1, self.conv_cls2, self.conv_cls3 = None, None, None
+        self.conv_cls_alternatives = [self.conv_cls1, self.conv_cls2, self.conv_cls3]
+        self.conv_box1, self.conv_box2, self.conv_box3 = None, None, None
+        self.conv_box_alternatives = [self.conv_box1, self.conv_box2, self.conv_box3]
+        for i in range(1, len(num_upsample_filters) + 1):
+            self.conv_cls_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]), num_cls, 1)
+            self.conv_box_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]),
+                                                          num_anchor_per_loc * box_code_size, 1)
+        self.conv_cls1, self.conv_cls2, self.conv_cls3 = self.conv_cls_alternatives[:]
+        self.conv_box1, self.conv_box2, self.conv_box3 = self.conv_box_alternatives[:]
 
-        else:
-            self.conv_cls = nn.Conv2d(final_num_filters, num_cls, 1)
-            self.conv_box = nn.Conv2d(final_num_filters,
-                                      num_anchor_per_loc * box_code_size, 1)
 
         if use_direction_classifier:
-            if self._imprecise_computation:
-                # assert len(num_upsample_filters) == 3
-                self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3 = None, None, None
-                self.conv_dir_cls_alternatives = [self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3]
-                for i in range(1, len(num_upsample_filters) + 1):
-                    self.conv_dir_cls_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]),
-                                                                      num_anchor_per_loc * num_direction_bins, 1)
-                self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3 = self.conv_dir_cls_alternatives[:]
-            else:
-                self.conv_dir_cls = nn.Conv2d(
-                    final_num_filters, num_anchor_per_loc * num_direction_bins, 1)
+            # assert len(num_upsample_filters) == 3
+            self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3 = None, None, None
+            self.conv_dir_cls_alternatives = [self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3]
+            for i in range(1, len(num_upsample_filters) + 1):
+                self.conv_dir_cls_alternatives[i - 1] = nn.Conv2d(sum(num_upsample_filters[:i]),
+                                                                  num_anchor_per_loc * num_direction_bins, 1)
+            self.conv_dir_cls1, self.conv_dir_cls2, self.conv_dir_cls3 = self.conv_dir_cls_alternatives[:]
 
     def forward(self, x):
         # RPN blocks are executed here
@@ -445,61 +435,38 @@ class RPNBase(RPNNoHeadBase):
         # but the original repo did that instead of using ()
         # so I am going to do it as well ! :)
         res = super().forward(x)
-        if self._imprecise_computation:
-            all_cls_preds = []
-            all_box_preds = []
-            all_dir_cls_preds = []
-            # Now we execute RPN Head
-            for i in range(len(self._layer_nums)):
-                if self._training or i + 1 == len(self._layer_nums):
-                    to_concat = []
-                    for j in range(i + 1):
-                        to_concat.append(res["up" + str(j)])
-                    # last iter will save x, ignore previous ones
-                    x = torch.cat(to_concat, dim=1)
-                    x_cls = self.conv_cls_alternatives[i](x)
-                    C, H, W = x_cls.shape[1:]
-                    x_cls = x_cls.view(-1, self._num_anchor_per_loc, self._num_class, H, W).permute(
+        all_cls_preds = []
+        all_box_preds = []
+        all_dir_cls_preds = []
+        # Now we execute RPN Head
+        for i in range(len(self._layer_nums)):
+            if self._training or i + 1 == len(self._layer_nums):
+                to_concat = []
+                for j in range(i + 1):
+                    to_concat.append(res["up" + str(j)])
+                # last iter will save x, ignore previous ones
+                x = torch.cat(to_concat, dim=1)
+                x_cls = self.conv_cls_alternatives[i](x)
+                C, H, W = x_cls.shape[1:]
+                x_cls = x_cls.view(-1, self._num_anchor_per_loc, self._num_class, H, W).permute(
+                    0, 1, 3, 4, 2).contiguous()
+                all_cls_preds.append(x_cls)
+
+                x_box = self.conv_box_alternatives[i](x)
+                x_box = x_box.view(-1, self._num_anchor_per_loc, self._box_code_size, H, W).permute(
+                    0, 1, 3, 4, 2).contiguous()
+                all_box_preds.append(x_box)
+
+                if self._use_direction_classifier:
+                    x_dir = self.conv_dir_cls_alternatives[i](x)
+                    x_dir = x_dir.view(-1, self._num_anchor_per_loc, self._num_direction_bins, H, W).permute(
                         0, 1, 3, 4, 2).contiguous()
-                    all_cls_preds.append(x_cls)
+                    all_dir_cls_preds.append(x_dir)
 
-                    x_box = self.conv_box_alternatives[i](x)
-                    x_box = x_box.view(-1, self._num_anchor_per_loc, self._box_code_size, H, W).permute(
-                        0, 1, 3, 4, 2).contiguous()
-                    all_box_preds.append(x_box)
-
-                    if self._use_direction_classifier:
-                        x_dir = self.conv_dir_cls_alternatives[i](x)
-                        x_dir = x_dir.view(-1, self._num_anchor_per_loc, self._num_direction_bins, H, W).permute(
-                            0, 1, 3, 4, 2).contiguous()
-                        all_dir_cls_preds.append(x_dir)
-
-            cls_preds = torch.stack(all_cls_preds) if self._training else all_cls_preds[-1]
-            box_preds = torch.stack(all_box_preds) if self._training else all_box_preds[-1]
-            if self._use_direction_classifier:
-                dir_cls_preds = torch.stack(all_dir_cls_preds) if self._training else all_dir_cls_preds[-1]
-        else:
-            x = res["out"]
-            box_preds = self.conv_box(x)
-            cls_preds = self.conv_cls(x)
-
-            # [N, C, y(H), x(W)]
-            C, H, W = box_preds.shape[1:]
-            box_preds = box_preds.view(-1, self._num_anchor_per_loc,
-                                       self._box_code_size, H, W).permute(
-                0, 1, 3, 4, 2).contiguous()
-
-            cls_preds = cls_preds.view(-1, self._num_anchor_per_loc,
-                                       self._num_class, H, W).permute(
-                0, 1, 3, 4, 2).contiguous()
-            # box_preds = box_preds.permute(0, 2, 3, 1).contiguous()
-            # cls_preds = cls_preds.permute(0, 2, 3, 1).contiguous()
-
-            if self._use_direction_classifier:
-                dir_cls_preds = self.conv_dir_cls(x)
-                dir_cls_preds = dir_cls_preds.view(
-                    -1, self._num_anchor_per_loc, self._num_direction_bins, H, W).permute(0, 1, 3, 4, 2).contiguous()
-                # dir_cls_preds = dir_cls_preds.permute(0, 2, 3, 1).contiguous()
+        cls_preds = torch.stack(all_cls_preds) if self._training else all_cls_preds[-1]
+        box_preds = torch.stack(all_box_preds) if self._training else all_box_preds[-1]
+        if self._use_direction_classifier:
+            dir_cls_preds = torch.stack(all_dir_cls_preds) if self._training else all_dir_cls_preds[-1]
 
         ret_dict = {
             "box_preds": box_preds,
