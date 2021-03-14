@@ -407,10 +407,18 @@ def train(config_path,
                     net.clear_timer()
                     prog_bar.start((len(eval_dataset) + eval_input_cfg.batch_size - 1)
                                    // eval_input_cfg.batch_size)
-                    for example in iter(eval_dataloader):
-                        example = example_convert_to_torch(example, float_dtype)
-                        detections += net(example)
-                        prog_bar.print_bar()
+                    with torch.no_grad():
+                        for example in iter(eval_dataloader):
+                            example = example_convert_to_torch(example, float_dtype)
+                            io_dict = net.forward_pfe(example)
+                            for i in range(3): # num rpn stages
+                                io_dict = net.forward_rpn_stage(io_dict)
+                            detections += net.predict(example, io_dict)
+                            net.cuda_sync_and_calc_elapsed_times()
+                            del io_dict
+                            torch.cuda.empty_cache()
+
+                            prog_bar.print_bar()
 
                     sec_per_ex = len(eval_dataset) / (time.time() - t)
                     model_logging.log_text(
@@ -622,7 +630,6 @@ def evaluate(config_path,
                             io_dict = net.forward_rpn_stage(io_dict)
                         net.outp_batch_sizes_check(example, io_dict["box_preds"])
                         dets += net.predict(example, io_dict)
-                        torch.cuda.synchronize()
 
                 return dets
 
